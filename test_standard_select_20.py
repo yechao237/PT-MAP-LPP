@@ -117,9 +117,25 @@ def QRreduction(datas):
 
 
 # 初始化高斯模型
-def initGaussianModel(n_ways, lam, n_runs, n_shot, n_queries, n_nfeat, ndatas):
+def initGaussianModel(n_ways, lam, n_runs, n_shot, n_queries, n_nfeat, ndatas, list_indices):
     # mus = ndatas.reshape(n_runs, n_shot + n_queries, n_ways, n_nfeat)[:, :n_shot, ].mean(1)
-    mus = ndatas.reshape(n_shot + n_queries, n_ways, n_nfeat)[:n_shot, ].mean(0).cuda()
+    # 将list_indices中的每个值加上25
+    list_indices = [[idx + 25 for idx in sublist] for sublist in list_indices]
+    mus = []
+    for i in range(n_ways):
+        start_idx = i * (n_shot + n_queries)
+        end_idx = start_idx + n_shot
+        # 选择start_idx:end_idx范围内的样本
+        selected_data = ndatas[start_idx:end_idx]
+        # 从list_indices中选择对应的索引
+        additional_data = ndatas[list_indices[i]]
+        # 将这两部分的数据合并
+        combined_data = torch.cat([selected_data, additional_data], dim=0)
+        # 计算合并后的数据的均值
+        mus.append(combined_data.mean(0))
+
+    mus = torch.stack(mus).cuda()
+    # mus = ndatas.reshape(n_shot + n_queries, n_ways, n_nfeat)[:n_shot, ].mean(0).cuda()
     model = {"n_ways": n_ways, "mus": mus, "lam": lam}
     return model
 
@@ -174,9 +190,7 @@ def LPP(ndatas, n_lsamples, options, W):
     return ndatas
 
 # 获取概率矩阵
-def getProbasGaussianModel(model, ndatas, labels, n_lsamples, n_queries, W, options):
-    # LPP降维
-    ndatas = LPP(ndatas, n_lsamples, options, W).squeeze(0)
+def getProbasGaussianModel(model, ndatas, labels, n_lsamples, n_queries, W):
     n_samples, n_nfeat = ndatas.size()
     # compute squared dist to centroids [n_samples][n_ways]
     ndatas = ndatas.cuda()
@@ -188,13 +202,13 @@ def getProbasGaussianModel(model, ndatas, labels, n_lsamples, n_queries, W, opti
     p_xj_test, sum_weight = compute_optimal_transport(dist[n_lsamples:], r, c, model["lam"], epsilon=1e-6)
 
     # loss_list 使用sinkhorn计算出的概率矩阵和距离相乘
-    weight_dist = p_xj_test * dist[n_lsamples:]
-    loss_list = [torch.sum(weight_dist[i]).cpu().numpy() / sum_weight.cpu().numpy() for i in range(n_samples - n_lsamples)]
+    # weight_dist = p_xj_test * dist[n_lsamples:]
+    # loss_list = [torch.sum(weight_dist[i]).cpu().numpy() / sum_weight.cpu().numpy() for i in range(n_samples - n_lsamples)]
 
     p_xj[n_lsamples:] = p_xj_test
     p_xj[:n_lsamples].fill_(0)
     p_xj[:n_lsamples].scatter_(1, labels[:n_lsamples].unsqueeze(1), 1)
-    return loss_list, p_xj, W
+    return p_xj, W
 
 # 返回全连接层
 def weight_imprinting(X, Y, model):
@@ -245,13 +259,16 @@ def label_denoising(opt, support, support_ys, query, query_ys_pred):
 
 
 # 均值向量
-def estimateFromMaskGaussianModel(mask, ndatas):
+def estimateFromMaskGaussianModel(mask, ndatas, select):
     ''''''
     '''
     估计均值向量
     通过样本的归属信息 (mask) 计算每个类别的中心坐标。mask 中的每个元素表示相应的样本是否属于相应的类别。
     这个函数的结果可以用于 updateGaussianModel 函数更新类别的中心坐标。
     '''
+    # 使用select选择mask和ndatas的行
+    mask = mask[select]
+    ndatas = ndatas[select]
     mask = mask.double().cuda()  # 将 mask 转换为 Double 类型
     ndatas = ndatas.double().cuda()  # 将 ndatas 转换为 Double 类型
     # emus = mask.permute(0,2,1).matmul(ndatas).div(mask.sum(dim=1).unsqueeze(2))
@@ -273,11 +290,11 @@ def getAccuracyGaussianModel_iteracc(olabels, labels, iter):
 
 
 # 执行一轮高斯模型迭代
-def performEpochGaussianModel(model, ndatas, ndatas_lpp, labels, n_lsamples, n_queries, alpha, W, options):
-    loss_list, p_xj, W = getProbasGaussianModel(model, ndatas, labels, n_lsamples, n_queries, W, options)
-    emus = estimateFromMaskGaussianModel(p_xj, ndatas_lpp)
-    model = updateGaussianModel(model, emus, alpha)
-    return loss_list, model, p_xj
+def performEpochGaussianModel(model, ndatas_lpp, labels, n_lsamples, n_queries, alpha, W, select):
+    p_xj, W = getProbasGaussianModel(model, ndatas_lpp, labels, n_lsamples, n_queries, W)  # 使用原本的查询集数据获取概率矩阵
+    emus = estimateFromMaskGaussianModel(p_xj, ndatas_lpp, select)  # 使用更新后的支持集去更新均值
+    model = updateGaussianModel(model, emus, alpha)  # 使用均值去更新高斯模型
+    return model, p_xj
 
 # 求均值和标准差
 def mean_confidence_interval(data, confidence=0.95):
@@ -290,10 +307,6 @@ def mean_confidence_interval(data, confidence=0.95):
 # 执行高斯模型迭代和选择伪标签迭代
 def loopGaussianModel(ndatas, labels, n_shot, n_ways, n_queries, alpha, n_epochs=20, verbose1=False, verbose2=True):
     num_task, n_sum = ndatas.shape[0], ndatas.shape[1]
-    n_shot_real = n_shot
-    n_queries_real = n_queries
-    n_lsamples_real = n_ways * n_shot
-    n_usamples_real = n_ways * n_queries
     n_lsamples = n_ways * n_shot
     n_usamples = n_ways * n_queries
 
@@ -318,26 +331,28 @@ def loopGaussianModel(ndatas, labels, n_shot, n_ways, n_queries, alpha, n_epochs
         query_features = idatas[n_lsamples:].cpu().numpy()
         support_ys = ilabels[:n_lsamples].cpu().numpy()
         query_ys = ilabels[n_lsamples:].cpu().numpy()
-        query_ys_updated = query_ys
-        total_f = support_ys.shape[0] + query_ys.shape[0]
+        query_features_real = query_features
+        # LPP
+        W = My_constructW(idatas, options)
+        idatas_lpp = LPP(idatas, n_lsamples, options, W)
+        # iterative label selection
+        select = np.ones(100, dtype=bool)
+        select[25:] = False
+        list_indices = [[],[],[],[],[]]
         for j in range(iterations):
-            # LPP
-            W = My_constructW(idatas, options)
-            idatas_lpp = LPP(idatas, n_lsamples, options, W)
-
-            # Gaussian Model
+            # Gaussian Model 每次选择之后是否需要重新初始化
             n_nfeat = idatas_lpp.size(1)
-            model = initGaussianModel(n_ways, lam, n_runs, n_shot, n_queries, n_nfeat, idatas_lpp)
+            model = initGaussianModel(n_ways, lam, n_runs, n_shot, n_queries, n_nfeat, idatas_lpp, list_indices)
+
             # print(model["mus"].shape, idatas_lpp.shape)
             for epoch in range(1, n_epochs + 1):
                 if verbose1:
                     print(f"----- task[{i + 1:3d}], epoch[{epoch:3d}]  lr_p: {alpha:.3f}")
-                loss_list, model_data, p_xj = performEpochGaussianModel(model, idatas, idatas_lpp,ilabels, n_lsamples, n_queries, alpha, W, options)
-                # if epoch == 20:
-            query_ys_pred = p_xj[n_lsamples:].argmax(dim=1).cpu().numpy()
+                model, p_xj = performEpochGaussianModel(model, idatas_lpp, ilabels, n_lsamples, n_queries, alpha, W, select)
+            query_ys_pred = p_xj[n_lsamples:].argmax(dim=1).cpu().numpy()  # 每次预测全部查询集标签
             # iterative label selection
             # 1 label_denoising
-            loss_statistics, _ = label_denoising(params, support_features, support_ys, query_features,
+            loss_statistics, _ = label_denoising(params, support_features, support_ys, query_features_real,
                                                  query_ys_pred)
             un_loss_statistics = loss_statistics[support_ys.shape[0]:].detach().numpy()  # np.amax(P, 1)
 
@@ -345,96 +360,22 @@ def loopGaussianModel(ndatas, labels, n_shot, n_ways, n_queries, alpha, n_epochs
             # un_loss_statistics = loss_list
 
             rank = sp.stats.rankdata(un_loss_statistics, method='ordinal')
-            indices, ys = rank_per_class(support_ys.max() + 1, rank, query_ys_pred, params['best_samples'])
-            if len(indices) < 15:
-                getAccuracyGaussianModel_iteracc(torch.from_numpy(support_ys[(n_shot_real * n_ways):]).cuda(),
-                                                 torch.from_numpy(query_ys[(n_queries_real * n_ways):]).cuda(), j)
-                break
-
+            indices, list_indices, ys = rank_per_class(support_ys.max() + 1, rank, query_ys_pred, params)
+            print(len(indices))
             # 找到使用伪标签的样本
-            pseudo_mask = np.in1d(np.arange(query_features.shape[0]), indices)
-            pseudo_features, query_features = query_features[pseudo_mask], query_features[~pseudo_mask]
-            pseudo_ys, query_ys_pred = query_ys_pred[pseudo_mask], query_ys_pred[~pseudo_mask]
-            query_ys_concat, query_ys_updated = query_ys_updated[pseudo_mask], query_ys_updated[~pseudo_mask]
-
-            # 修改顺序
-            pseudo_ys, pseudo_features, query_ys_concat = reorder_samples(pseudo_ys, pseudo_features, query_ys_concat)
-
-            # 将源数据集和目标数据集中使用伪标签的样本拼接在一起，扩充支持集
-            support_features = np.concatenate((support_features, pseudo_features), axis=0)
-            support_ys = np.concatenate((support_ys, pseudo_ys), axis=0)
-            query_ys = np.concatenate((query_ys, query_ys_concat), axis=0)
-
-            # if opt.unbalanced:
-            remaining_labels(params, pseudo_ys)
-            if support_features.shape[0] == total_f:
-                getAccuracyGaussianModel_iteracc(torch.from_numpy(support_ys[(n_shot_real * n_ways):]).cuda(),
-                                                 torch.from_numpy(query_ys[(n_queries_real * n_ways):]).cuda(), j)
+            pseudo_mask = np.in1d(np.arange(query_features_real.shape[0]), indices)
+            if len(indices) > 60:
+                getAccuracyGaussianModel_iteracc(torch.from_numpy(query_ys_pred[pseudo_mask]).cuda(),
+                                                 torch.from_numpy(query_ys[pseudo_mask]).cuda(), j)
                 break
-
-            idatas = torch.from_numpy(np.concatenate((support_features, query_features), axis=0))
-            ilabels = torch.from_numpy(np.concatenate((support_ys, query_ys), axis=0)).cuda()
-            n_shot += 3
-            n_queries -= 3
-            n_lsamples = n_ways * n_shot
-            n_usamples = n_ways * n_queries
+            select[-75:] = pseudo_mask
             if verbose2:
-                getAccuracyGaussianModel_iteracc(torch.from_numpy(support_ys[(n_shot_real * n_ways):]).cuda(),torch.from_numpy(query_ys[(n_queries_real * n_ways):]).cuda(), j)
-        n_shot = n_shot_real
-        n_queries = n_queries_real
-        n_lsamples = n_ways * n_shot
-        n_usamples = n_ways * n_queries
-        support_ys = np.concatenate((support_ys, query_ys_pred), axis=0)
-        support_features = np.concatenate((support_features, query_features), axis=0)
-        query_ys = np.concatenate((query_ys, query_ys_updated), axis=0)
-        query_ys_pred = support_ys[n_lsamples_real:]
-        query_ys = query_ys[query_ys_pred.shape[0]:]
-        # print(query_ys.shape, query_ys_pred.shape)
+                getAccuracyGaussianModel_iteracc(torch.from_numpy(query_ys_pred[pseudo_mask]).cuda(),torch.from_numpy(query_ys[pseudo_mask]).cuda(), j)
         acc = getAccuracyGaussianModel_labelacc(torch.from_numpy(query_ys_pred).cuda(), torch.from_numpy(query_ys).cuda(), acc, i, verbose2=True)
     return mean_confidence_interval(acc)
 
-# 仍然存在的伪标签
-def remaining_labels(params, selected_samples):  # 4
-    for i in range(len(params['no_samples'])):
-        occurrences = np.count_nonzero(selected_samples == i)
-        params['no_samples'][i] = params['no_samples'][i] - occurrences
-
-# 将标签重新排序
-def reorder_samples(pseudo_ys, pseudo_features, query_ys_updated):
-    # 创建空的列表用于存储重排序后的标签和特征
-    reordered_ys = []
-    reordered_features = []
-    reordered_query_ys_updated = []
-
-    # 获取每个类别的索引
-    indices = [np.where(pseudo_ys == i)[0] for i in range(5)]
-
-    # 循环选取每个类别的样本，直到所有样本都被选取
-    while True:
-        for i in range(5):
-            if len(indices[i]) > 0:
-                # 选取一个样本并移除
-                index = indices[i][0]
-                indices[i] = indices[i][1:]
-
-                # 将样本添加到重排序的列表中
-                reordered_ys.append(pseudo_ys[index])
-                reordered_features.append(pseudo_features[index])
-                reordered_query_ys_updated.append(query_ys_updated[index])
-
-        # 检查是否所有的样本都被选取
-        if all(len(ind) == 0 for ind in indices):
-            break
-
-    # 将列表转化为numpy数组或者张量
-    reordered_ys = np.array(reordered_ys)
-    reordered_features = np.stack(reordered_features)
-    reordered_query_ys_updated = np.stack(reordered_query_ys_updated)
-
-    return reordered_ys, reordered_features, reordered_query_ys_updated
-
 # 对损失值排序，输出伪标签中与5个class中值最小的3个,共15个
-def rank_per_class(no_cls, rank, ys_pred, no_keep):
+def rank_per_class(no_cls, rank, ys_pred, params):
     list_indices = []
     list_ys = []
     for i in range(no_cls):
@@ -442,13 +383,14 @@ def rank_per_class(no_cls, rank, ys_pred, no_keep):
         y = np.ones((no_cls,)) * i
         class_rank = rank[cur_idx]
         class_rank_sorted = sp.stats.rankdata(class_rank, method='ordinal')
-        class_rank_sorted[class_rank_sorted > no_keep] = 0
+        class_rank_sorted[class_rank_sorted > params['best_samples']] = 0
         indices = np.nonzero(class_rank_sorted)
         list_indices.append(cur_idx[0][indices[0]])
         list_ys.append(y)
     idxs = np.concatenate(list_indices, axis=0)
     ys = np.concatenate(list_ys, axis=0)
-    return idxs, ys
+    params['best_samples'] += 3
+    return idxs, list_indices, ys
 
 if __name__ == '__main__':
     # ---- data loading
