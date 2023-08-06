@@ -243,6 +243,7 @@ def label_denoising(opt, support, support_ys, query, query_ys_pred):
         lr_progression.append(optimizer.param_groups[0]['lr'])
     return loss_statistics, lr_progression
 
+
 # 均值向量
 def estimateFromMaskGaussianModel(mask, ndatas):
     ''''''
@@ -269,6 +270,7 @@ def getAccuracyGaussianModel_labelacc(olabels, labels, acc, iter, verbose2=True)
 def getAccuracyGaussianModel_iteracc(olabels, labels, iter):
     matches = labels.eq(olabels).float()  # 与真实标签比较，得到匹配的标签
     print("accuracy from filtered probas iter ", iter, " ", matches.mean().item())
+
 
 # 执行一轮高斯模型迭代
 def performEpochGaussianModel(model, ndatas, ndatas_lpp, labels, n_lsamples, n_queries, alpha, W, options):
