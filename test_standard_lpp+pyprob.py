@@ -735,7 +735,7 @@ class MAP:
         op_xj = model.getProbas()
 
         # 计算op_xj和probMatrix_all在概率维度上的平均值
-        average_probs = (op_xj[:, n_lsamples:, :] + 0.6 * probMatrix3 + 0.3 * probMatrix1) / 2
+        average_probs = (op_xj[:, n_lsamples:, :] + 0.6 * probMatrix2 + 0.3 * probMatrix1) / 2
         op_xj[:, n_lsamples:, :] = average_probs
 
         acc = self.getAccuracy(op_xj)
@@ -744,7 +744,7 @@ class MAP:
 
 if __name__ == '__main__':
     # ---- data loading
-    n_shot = 5
+    n_shot = 1
     n_ways = 5
     n_queries = 15
     n_lsamples = n_ways * n_shot
@@ -849,8 +849,8 @@ if __name__ == '__main__':
     model = GaussianModel(n_ways, lam)
     model.initFromLabelledDatas()
 
-    alpha = 0.2
-    # alpha = 0.3
+    # alpha = 0.2
+    alpha = 0.3
     optim = MAP(alpha)
 
     optim.verbose = True
