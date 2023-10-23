@@ -348,7 +348,7 @@ def check_plabels(top_labels, num=4):
         print("False label is exist!")
 
 
-def selectdata(entropies, ndatas, prelabels, nlabels, n_ways, num, verbose=False):
+def selectdata(entropies, ndatas, prelabels, nlabels, n_ways, num, verbose=False, select=1):
     # 初始化存储所选数据和标签的容器
     selected_data = []
     selected_labels = []
@@ -370,8 +370,37 @@ def selectdata(entropies, ndatas, prelabels, nlabels, n_ways, num, verbose=False
                 print("less than 4！")
                 continue
             label_entropies = task_entropies[label_indices]  # 获取当前类别样本的熵
-            _, top_label_indices = torch.topk(label_entropies, num, largest=False)  # 对熵进行排序并获取最小的4个值的索引
-            task_indices.extend(label_indices[top_label_indices].tolist())  # 将这些索引添加到当前任务的索引列表中
+
+            # idea1 select by entropy level
+            if select == 1:
+                threshold = torch.quantile(label_entropies, 0.5)  # 计算20%的熵阈值, 这里用量化值来表示20%的阈值
+                qualified_indices = torch.where(label_entropies >= threshold)[0] # 获取不小于20%熵阈值的样本
+                # 如果满足条件的样本不足num个，可以选择处理的逻辑，比如继续、警告或者使用所有满足条件的样本
+                if len(qualified_indices) < num:
+                    print(
+                        f"Warning: Not enough samples above the threshold for label {label}. Needed {num}, got {len(qualified_indices)}.")
+                    continue
+                # 对合格样本的熵进行排序并获取熵最小的num个样本的索引
+                _, top_label_indices = torch.topk(label_entropies[qualified_indices], num, largest=False)
+                selected_indices = qualified_indices[top_label_indices]  # 从合格的索引中选择top标签索引
+                task_indices.extend(label_indices[selected_indices].tolist())  # 将这些索引添加到当前任务的索引列表中
+            else:
+                # 计算熵的中位数（50%分位数）
+                median_entropy = torch.median(label_entropies)
+                # 计算每个样本熵与中位数的差的绝对值
+                diff_from_median = torch.abs(label_entropies - median_entropy)
+                # 对差值进行排序，但同时获取原始熵值的索引（为了在相同差值情况下选择熵值较低的样本）
+                sorted_diffs, sorted_indices = torch.sort(diff_from_median)
+                # 选择差异最小的num个样本，但如果差异相同，则选择熵值较低的样本
+                selected_for_label = []
+                for i in range(num):
+                    if i >= len(sorted_indices):  # 防止索引越界
+                        break
+                    # 选择当前最接近中位数的样本
+                    current_closest_idx = sorted_indices[i]
+                    selected_for_label.append(label_indices[current_closest_idx].item())
+                task_indices.extend(selected_for_label)
+
         task_indices = reorder(task_indices, num=num)  # reorder
 
         # _, task_indices = torch.topk(entropies, 20, largest=True)  # largest=False最小
@@ -403,7 +432,7 @@ def get_mus(active_ndatas, active_nlabels, n_lsamples):
 
 if __name__ == '__main__':
     # ---- data loading
-    num = 1  # active learning选择的样本个数
+    num = 4  # active learning选择的样本个数
     n_shot = 5
     n_ways = 5
     n_queries = 15
@@ -416,7 +445,7 @@ if __name__ == '__main__':
 
     import FSLTask
     cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # 5-shot 5-way 45查询集
-    dataset = r"miniimagenet"
+    dataset = r"cifar"
     FSLTask.loadDataSet(dataset)
     FSLTask.setRandomStates(cfg)
     n_runs = FSLTask._maxRuns
@@ -428,8 +457,10 @@ if __name__ == '__main__':
     # partition for afsl learning
     ndatas, active_data = all_ndatas[:, :fsl_train_samples, :], all_ndatas[:, fsl_train_samples:, :]  # fsl训练的数据和主动学习额外数据
     labels, active_label = labels[:, :fsl_train_samples], labels[:, fsl_train_samples:]  # 训练的标签和主动学习标签
-    active_ndatas = torch.cat((ndatas[:, :((n_shot - num) * n_ways), :], ndatas[:, 25:, :], active_data), dim=1)  # afsl的初始数据
-    active_nlabels = torch.cat((labels[:, :((n_shot - num) * n_ways)], labels[:, 25:], active_label), dim=1)  # afsl的初始标签
+    query_datas = ndatas[:, n_lsamples:, :].cuda()
+    query_labels = labels[:, n_lsamples:].cuda()
+    active_ndatas = torch.cat((ndatas[:, :((n_shot - num) * n_ways), :], active_data), dim=1)  # afsl的初始数据
+    active_nlabels = torch.cat((labels[:, :((n_shot - num) * n_ways)], active_label), dim=1)  # afsl的初始标签
     print(ndatas.shape, active_ndatas.shape, active_data.shape, labels.shape, active_nlabels.shape, active_label.shape)
 
     # step1: fsl
@@ -447,35 +478,37 @@ if __name__ == '__main__':
     # step2: afsl  for every task, choose 20 samples, and return active datas and labels
     # step2.1 use fsl 5-way-1-shot experiment to get active prob
     n_shot = 5 - num
-    n_queries = n_queries + n_unlabelled
+    temp = n_queries
+    n_queries = n_unlabelled
     n_lsamples = n_shot * n_ways
     n_usamples = n_queries * n_ways
 
     acc_test, prelabels, prob_active = Gasussianloop(n_shot, n_queries, n_ways, active_ndatas_fsl, active_nlabels, active_epoch=True, active=True)
     print("afsl accuracy1 with 45 queries: {:0.2f}±{:0.2f}".format(*(100 * x for x in acc_test)))
 
-    n_queries = n_queries - n_unlabelled
-    n_usamples = n_queries * n_ways
-    prob_active = prob_active[:, (n_lsamples + n_usamples):, :]
-    prelabels = prelabels[:, (n_lsamples + n_usamples):]
+    prob_active = prob_active[:, n_lsamples:, :]
+    prelabels = prelabels[:, n_lsamples:]
     print(prob_active.shape, prelabels.shape)
 
     # step2.2 for every task, use entrophy to get 20 samples
     # prob_active = torch.rand(n_runs, active_samples, n_ways)
     entropies = get_entropyies(prob_active)
-    selected_data, selected_labels = selectdata(entropies, active_data, prelabels, active_label, n_ways, num, verbose=True)
+    selected_data, selected_labels = selectdata(entropies, active_data, prelabels, active_label, n_ways, num, verbose=True, select=2)
 
     # step2.3 update afsl data
-    d_split1, d_split2, d_split3 = torch.split(active_ndatas, [n_lsamples, n_usamples, active_samples], dim=1)
-    l_split1, l_split2, l_split3 = torch.split(active_nlabels, [n_lsamples, n_usamples, active_samples], dim=1)
+    d_split1, d_split2 = torch.split(active_ndatas, [n_lsamples, active_samples], dim=1)
+    l_split1, l_split2 = torch.split(active_nlabels, [n_lsamples, active_samples], dim=1)
     support_datas = torch.cat([d_split1, selected_data], dim=1)
     support_labels = torch.cat([l_split1, selected_labels], dim=1)
-    active_ndatas = torch.cat([support_datas, d_split2], dim=1).cpu()
-    active_nlabels = torch.cat([support_labels, l_split2], dim=1).cpu()
+
+    active_ndatas = torch.cat([support_datas, query_datas], dim=1).cpu()
+    active_nlabels = torch.cat([support_labels, query_labels], dim=1).cpu()
 
     # step3 afsl
     n_shot = 5
-    n_lsamples= n_ways * n_shot
+    n_queries = temp
+    n_lsamples = n_ways * n_shot
+    n_usamples = n_queries * n_ways
 
     active_ndatas, active_nlabels = data_preprocessing(active_ndatas, active_nlabels)  # 数据预处理
     start_time = time.time()  # 记录开始时间
