@@ -172,18 +172,34 @@ class GaussianModel(Model):
         P /= P.view((n_runs, -1)).sum(1).unsqueeze(1).unsqueeze(1)
         u = torch.zeros(n_runs, n).cuda()
         maxiters = 1000
-        iters = 1
+
+
+        # 按任务进行循环处理
+        # for idx in range(n_runs):  # Loop over tasks
+        #     iters = 1
+        #     while torch.max(torch.abs(u[idx] - P[idx].sum(1))) > epsilon:
+        #         u[idx] = P[idx].sum(1)
+        #         P[idx] *= (r[idx] / u[idx]).view((-1, 1))
+        #         P[idx] *= (c[idx] / P[idx].sum(0)).view((1, -1))
+        #         if iters == maxiters:
+        #             break
+        #         iters = iters + 1
+
         # normalize this matrix
-        while torch.max(torch.abs(u - P.sum(2))) > epsilon:
+        iters = 1
+        while torch.max(torch.abs(u - P.sum(2))) > epsilon:  # 如果P当中存在nan，这里就不会执行了
             u = P.sum(2)
             P *= (r / u).view((n_runs, -1, 1))
             P *= (c / P.sum(1)).view((n_runs, 1, -1))
             if iters == maxiters:
                 break
             iters = iters + 1
+
+        # print(torch.max(torch.abs(u - P[88].sum(1))) > epsilon)  # miniimagenet nan
         return P, torch.sum(P * M)
 
     def getProbas(self):
+        # self.mus[88, 3] = torch.zeros(35).cuda()
         # compute squared dist to centroids [n_runs][n_samples][n_ways]
         dist = (self.ndatas.unsqueeze(2) - self.mus.unsqueeze(1)).norm(dim=3).pow(2)
         r = torch.ones(n_runs, n_usamples)
@@ -194,6 +210,7 @@ class GaussianModel(Model):
         if self.active_epoch == False:
             p_xj[:, :n_lsamples].fill_(0)
             p_xj[:, :n_lsamples].scatter_(2, self.labels[:, :n_lsamples].unsqueeze(2), 1)
+
         return p_xj
 
     def estimateFromMask(self, mask):
@@ -235,7 +252,8 @@ class MAP:
             print("output model accuracy", acc)
 
     def loop(self, model, n_epochs=20):
-        self.probas = model.getProbas()
+        if self.active == False:
+            self.probas = model.getProbas()
         if self.verbose:
             print("initialisation model accuracy", self.getAccuracy(self.probas))
         for epoch in range(1, n_epochs + 1):
@@ -281,13 +299,10 @@ def data_preprocessing(ndatas, labels, n_lsamples, active=False):
 
 
 def Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels, active_epoch=False, active=False, mus=None):
-
     lam = 10
     alpha = 0.3 if n_shot == 1 else 0.2
-
     model = GaussianModel(n_ways, lam, ndatas, labels, active_epoch)
     model.initFromLabelledDatas(mus)
-
     optim = MAP(labels, alpha, active)
     optim.verbose = True
     optim.progressBar = True
@@ -309,17 +324,14 @@ def get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat):
         task_labels = support_labels[task_index]  # 当前任务的标签
         for class_index in range(5):  # 遍历每个类别
             class_indices = (task_labels == class_index).nonzero(as_tuple=True)[0]  # 找到当前类别的所有样本
-            class_data = task_data[class_indices]  # 选择对应的数据
-            mus[task_index, class_index] = class_data.mean(0)  # 计算当前类别的均值，并将其存储在mus张量中
             if len(class_indices) != 0:
                 class_data = task_data[class_indices]  # 选择对应的数据
                 mus[task_index, class_index] = class_data.mean(0)  # 计算当前类别的均值，并将其存储在mus张量中
             else:
                 print(f"Warning：missing values is exist!")
-                mus[task_index, class_index] = torch.zeros(n_nfeat).cuda()  # 初始化为0
+                mus[task_index, class_index] = torch.zeros(n_nfeat).cuda()  # 初始化为0 nan会使得无法进入sinkhorn中的迭代
                 # mus[task_index, class_index] = task_data.mean(0)  # 初始化为这个task的均值
     return mus
-
 
 def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0, random=1, n_clusters=10, samples_per_cluster=2, random_state=42):
     # ** idea2 n_clusters * samples_per_cluster可以是25，50，100
@@ -437,7 +449,7 @@ if __name__ == '__main__':
     n_shot = 5
     n_ways = 5
     n_queries = 15
-    n_unlabelled = 28
+    n_unlabelled = 100
     n_lsamples = n_ways * n_shot  # 25个已经标记的支持集，用于fsl
     n_usamples = n_ways * n_queries  # 75个查询集，用于fsl和afsl
     active_samples = n_ways * n_unlabelled  # 500/140个未标记的支持集(cub 140)   ** idea1:不均匀的情况
@@ -446,7 +458,7 @@ if __name__ == '__main__':
 
     import FSLTask
     cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # 5-shot 5-way 115 查询集+未标记支持集
-    dataset = r"cub"
+    dataset = r"tieredimagenet"
     FSLTask.loadDataSet(dataset)
     FSLTask.setRandomStates(cfg)
     n_runs = FSLTask._maxRuns
@@ -459,6 +471,7 @@ if __name__ == '__main__':
     ndatas, active_data = all_ndatas[:, :fsl_train_samples, :], all_ndatas[:, fsl_train_samples:, :]  # fsl的数据和未标记支持集数据
     labels, active_label = labels[:, :fsl_train_samples], labels[:, fsl_train_samples:]  # 训练的标签和未标记支持集标签
     active_ndatas = ndatas[:, n_lsamples:, :].clone()  # afsl的初始查询集数据
+
     active_nlabels = labels[:, n_lsamples:]  # afsl的初始查询集标签
     print(ndatas.shape, active_ndatas.shape, active_data.shape, labels.shape, active_nlabels.shape, active_label.shape)
 
@@ -479,7 +492,8 @@ if __name__ == '__main__':
     start_time = time.time()  # 记录开始时间
     # dist=0 and random=1,2,3 表示随机选 1:按类随机5*5  2:全部随机25  3:按真实标签随机5*5(相当于5-shot fsl)
     # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个
-    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=1, random=1)
+
+    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=2, random=2)
     active_ndatas = torch.cat([support_datas, active_ndatas], dim=1)
     active_nlabels = torch.cat([support_labels, active_nlabels], dim=1)
 
@@ -489,11 +503,12 @@ if __name__ == '__main__':
     # step3: afsl
     active_ndatas, active_nlabels = data_preprocessing(active_ndatas, active_nlabels, n_lsamples)  # 数据预处理
     n_nfeat = active_ndatas.size(2)
-    mus = get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat)  # 获取支持集均值
 
     # 使用n-shot
     n_shot = 4
     n_lsamples = n_ways * n_shot
+    mus = get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat)  # 获取支持集均值
+
     acc_test = Gasussianloop(n_shot, n_queries, n_ways, active_ndatas, active_nlabels, mus=mus)
     end_time = time.time()  # 记录结束时间
     elapsed_time = end_time - start_time  # 计算经过的时间
