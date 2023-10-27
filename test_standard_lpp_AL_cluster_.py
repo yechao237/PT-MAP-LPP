@@ -255,23 +255,6 @@ class MAP:
             return acc, olabels, op_xj
 
 
-def LPP_from_P(query_data, P):
-    options = {'WDim': query_data.shape[1], 'NeighborMode': 'KNN', 'WeightMode': 'HeatKernel', 'k': 7, 't': 1,
-               'd': 35, 'alpha': 10}
-    n_runs = query_data.shape[0]
-    query_data_2 = np.zeros((n_runs, query_data.shape[1], options['d']))
-    for i in range(n_runs):
-        query_data_proj = np.dot(query_data[i], P[i])
-        proj_mean = np.mean(query_data_proj, axis=0)
-        query_data_proj = query_data_proj - np.tile(proj_mean, (query_data_proj.shape[0], 1))
-        query_data_proj = My_L2Norm(query_data_proj)
-        query_data_2[i] = query_data_proj
-    query_data = np.array(query_data_2)
-    query_data = torch.from_numpy(query_data)
-    query_data = query_data.cuda()
-    return query_data
-
-
 def PT(ndatas, beta):
     nve_idx = np.where(ndatas.cpu().numpy() < 0)
     ndatas[nve_idx] *= -1
