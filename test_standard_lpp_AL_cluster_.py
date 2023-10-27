@@ -369,7 +369,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             for label in range(5):  # 标签是0, 1, 2, 3, 4
                 # 找到当前类别的所有样本
                 label_indices = (task_labels == label).nonzero(as_tuple=True)[0].cpu().numpy()
-                # 从当前类别中随机选择样本
+                # 从当前类别中随机选择样本  # replace=False 不重复抽样
                 selected_indices = np.random.choice(label_indices, samples_per_cluster, replace=False)
                 all_samples_selected.extend(selected_indices)
             # 从原始数据中提取所选样本
@@ -390,15 +390,19 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             # 获取当前簇的所有样本索引
             cluster_samples_idx = np.where(clusters == cluster_idx)[0]
             if dist == 0 and random == 1:
-                # 从当前簇中随机选择样本
-                selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=True)
+                if len(cluster_samples_idx) == 1:
+                    # 当前簇中只有一个样本，重复抽样
+                    selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=True)
+                else:
+                    # 从当前簇中随机选择样本
+                    selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=False)
             else:
                 # 计算当前簇中所有点到簇中心的距离
                 cluster_distances = distances_to_center[cluster_samples_idx]
                 if dist == 1:
                     # 找到距离的中位数
                     median_distance = np.median(cluster_distances)
-                    # 找到最接近中位数的距离的点
+                    # 找到最接近中位数的距离的点，可能只能选1个
                     target_indices = np.argsort(np.abs(cluster_distances - median_distance))[:samples_per_cluster]
                 elif dist == 2:
                     # 找到距离最近的点
@@ -420,7 +424,6 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
                     raise ValueError("Invalid value for 'dist'. Choose among 0, 1, 2, 3, or 4.")
 
                 selected_indices = cluster_samples_idx[target_indices]
-
             # 获取选定样本的数据和标签
             selected_data = task_data_afsl[selected_indices]
             selected_labels = task_labels[selected_indices]
@@ -428,7 +431,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             start_idx = samples_selected
             end_idx = start_idx + samples_per_cluster
             clustered_data[task_idx, start_idx:end_idx, :] = selected_data
-            clustered_labels[task_idx, start_idx:end_idx] = selected_labels
+            clustered_labels[task_idx, start_idx:end_idx] = selected_labels  # 这里即使只有一个，也会被选到两个当中
             samples_selected += samples_per_cluster
     return clustered_data, clustered_labels
 
@@ -458,7 +461,7 @@ if __name__ == '__main__':
 
     import FSLTask
     cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # 5-shot 5-way 115 查询集+未标记支持集
-    dataset = r"tieredimagenet"
+    dataset = r"cifar"
     FSLTask.loadDataSet(dataset)
     FSLTask.setRandomStates(cfg)
     n_runs = FSLTask._maxRuns
@@ -493,7 +496,7 @@ if __name__ == '__main__':
     # dist=0 and random=1,2,3 表示随机选 1:按类随机5*5  2:全部随机25  3:按真实标签随机5*5(相当于5-shot fsl)
     # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个
 
-    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=2, random=2)
+    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=0, random=2)
     active_ndatas = torch.cat([support_datas, active_ndatas], dim=1)
     active_nlabels = torch.cat([support_labels, active_nlabels], dim=1)
 
