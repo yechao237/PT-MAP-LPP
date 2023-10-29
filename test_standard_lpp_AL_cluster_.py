@@ -146,13 +146,12 @@ class Model:
 
 # ---------  GaussianModel
 class GaussianModel(Model):
-    def __init__(self, n_ways, lam, ndatas, labels, active_epoch=False):
+    def __init__(self, n_ways, lam, ndatas, labels):
         super(GaussianModel, self).__init__(n_ways)
         self.mus = None  # shape [n_runs][n_ways][n_nfeat]
         self.lam = lam
         self.ndatas = ndatas
         self.labels = labels
-        self.active_epoch = active_epoch
 
     def initFromLabelledDatas(self, mus=None):
         if mus == None:
@@ -207,10 +206,8 @@ class GaussianModel(Model):
         p_xj = torch.zeros_like(dist)
         p_xj_test, _ = self.compute_optimal_transport(dist[:, n_lsamples:], r, c, epsilon=1e-6)
         p_xj[:, n_lsamples:] = p_xj_test
-        if self.active_epoch == False:
-            p_xj[:, :n_lsamples].fill_(0)
-            p_xj[:, :n_lsamples].scatter_(2, self.labels[:, :n_lsamples].unsqueeze(2), 1)
-
+        p_xj[:, :n_lsamples].fill_(0)
+        p_xj[:, :n_lsamples].scatter_(2, self.labels[:, :n_lsamples].unsqueeze(2), 1)
         return p_xj
 
     def estimateFromMask(self, mask):
@@ -223,12 +220,11 @@ class GaussianModel(Model):
 # =========================================
 
 class MAP:
-    def __init__(self, labels, alpha=None, active=False):
+    def __init__(self, labels, alpha=None):
         self.verbose = False
         self.progressBar = False
         self.alpha = alpha
         self.labels = labels
-        self.active = active
 
     def getAccuracy(self, probas):
         olabels = probas.argmax(dim=2)
@@ -252,8 +248,7 @@ class MAP:
             print("output model accuracy", acc)
 
     def loop(self, model, n_epochs=20):
-        if self.active == False:
-            self.probas = model.getProbas()
+        self.probas = model.getProbas()
         if self.verbose:
             print("initialisation model accuracy", self.getAccuracy(self.probas))
         for epoch in range(1, n_epochs + 1):
@@ -262,16 +257,9 @@ class MAP:
             self.performEpoch(model)
             # if (self.progressBar): pb.update()
         # get final accuracy and return it
-        if self.active == False:
-            op_xj = model.getProbas()
-            acc = self.getAccuracy(op_xj)
-            return acc
-        else:
-            op_xj = model.getProbas()
-            acc = self.getAccuracy(op_xj)
-            olabels = op_xj.argmax(dim=2)
-            return acc, olabels, op_xj
-
+        op_xj = model.getProbas()
+        acc = self.getAccuracy(op_xj)
+        return acc
 
 def PT(ndatas, beta):
     nve_idx = np.where(ndatas.cpu().numpy() < 0)
@@ -280,11 +268,10 @@ def PT(ndatas, beta):
     ndatas[nve_idx] *= -1  # return the sign
     return ndatas
 
-def data_preprocessing(ndatas, labels, n_lsamples, active=False):
+def data_preprocessing(ndatas, labels, n_lsamples):
     beta = 0.5
     ndatas = PT(ndatas, beta)
-    if active == False:
-        ndatas = QRreduction(ndatas)
+    ndatas = QRreduction(ndatas)
     ndatas = scaleEachUnitaryDatas(ndatas)
     ndatas = centerDatas(ndatas, n_lsamples)  # trans-mean-sub
 
@@ -292,30 +279,25 @@ def data_preprocessing(ndatas, labels, n_lsamples, active=False):
     ndatas = ndatas.cuda()  # fsl ndatas
     labels = labels.cuda()
 
-    if active == False:
-        # LPP
-        ndatas, _ = get_LPP_datas(ndatas)
+    # LPP
+    ndatas, _ = get_LPP_datas(ndatas)
     return ndatas, labels
 
 
-def Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels, active_epoch=False, active=False, mus=None):
+def Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels, n_epochs=20, verbose=False, mus=None):
     lam = 10
     alpha = 0.3 if n_shot == 1 else 0.2
-    model = GaussianModel(n_ways, lam, ndatas, labels, active_epoch)
+    model = GaussianModel(n_ways, lam, ndatas, labels)
     model.initFromLabelledDatas(mus)
-    optim = MAP(labels, alpha, active)
-    optim.verbose = True
-    optim.progressBar = True
-    if active:
-        acc_test, prelabels, prob_active = optim.loop(model, n_epochs=20)
-        return acc_test, prelabels, prob_active
-    acc_test = optim.loop(model, n_epochs=20)
+    optim = MAP(labels, alpha)
+    optim.verbose = verbose
+    optim.progressBar = verbose
+    acc_test = optim.loop(model, n_epochs=n_epochs)
     return acc_test
 
 
 def get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat):
     n_runs = active_ndatas.size(0)
-    n_ways = len(torch.unique(active_nlabels))
     support_datas = active_ndatas[:, :n_lsamples, :]
     support_labels = active_nlabels[:, :n_lsamples]
     mus = torch.zeros((n_runs, 5, n_nfeat)).cuda()  # 初始化一个张量来存储计算出的均值
@@ -380,7 +362,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
         # 将数据转换为numpy数组，以适应scikit-learn的KMeans实现
         task_data_np = task_data.cpu().numpy()
         # 使用KMeans找到数据的簇
-        kmeans = KMeans(n_clusters=n_clusters, random_state=random_state).fit(task_data_np)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10).fit(task_data_np)
         clusters = kmeans.labels_
         # 计算所有点到其相应簇中心的距离
         distances_to_center = np.sqrt(((task_data_np - kmeans.cluster_centers_[clusters]) ** 2).sum(axis=1))
@@ -390,7 +372,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             # 获取当前簇的所有样本索引
             cluster_samples_idx = np.where(clusters == cluster_idx)[0]
             if dist == 0 and random == 1:
-                if len(cluster_samples_idx) == 1:
+                if len(cluster_samples_idx) < samples_per_cluster:
                     # 当前簇中只有一个样本，重复抽样
                     selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=True)
                 else:
@@ -405,13 +387,13 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
                     # 找到最接近中位数的距离的点，可能只能选1个
                     target_indices = np.argsort(np.abs(cluster_distances - median_distance))[:samples_per_cluster]
                 elif dist == 2:
-                    # 找到距离最近的点
+                    # 找到距离最近的点，可能只能选1个
                     target_indices = np.argsort(cluster_distances)[:samples_per_cluster]
                 elif dist == 3:
-                    # 找到距离最远的点
+                    # 找到距离最远的点，可能只能选1个
                     target_indices = np.argsort(-cluster_distances)[:samples_per_cluster]  # 注意这里我们使用了负数排序来获得最远的点
                 elif dist == 4:
-                    # 按照距离排序，找到位于前t位置的样本 t = 0.1,0.2,...
+                    # 按照距离排序，找到位于前t位置的样本 t = 0.1,0.2,...，可能只能选1个
                     t = 0.3
                     sorted_indices = np.argsort(cluster_distances)
                     t_percent_point = int(len(sorted_indices) * t)  # 计算前t的位置
@@ -421,7 +403,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
                     # 找到与簇中心距离最接近L的5个点
                     target_indices = np.argsort(np.abs(cluster_distances - L))[:samples_per_cluster]
                 else:
-                    raise ValueError("Invalid value for 'dist'. Choose among 0, 1, 2, 3, or 4.")
+                    raise ValueError("Invalid value for 'dist'. Choose among 0, 1, 2, 3, 4.")
 
                 selected_indices = cluster_samples_idx[target_indices]
             # 获取选定样本的数据和标签
@@ -429,12 +411,91 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             selected_labels = task_labels[selected_indices]
             # 将选定的样本存储到最终张量中
             start_idx = samples_selected
-            end_idx = start_idx + samples_per_cluster
-            clustered_data[task_idx, start_idx:end_idx, :] = selected_data
-            clustered_labels[task_idx, start_idx:end_idx] = selected_labels  # 这里即使只有一个，也会被选到两个当中
+            for i in range(samples_per_cluster):
+                # 循环赋值，解决选取不到足够样本不到的情况
+                data_idx = i % selected_data.shape[0]  # 这将在 0 到 num_selected_data-1 之间循环
+                clustered_data[task_idx, start_idx + i, :] = selected_data[data_idx]
+                clustered_labels[task_idx, start_idx + i] = selected_labels[data_idx]
             samples_selected += samples_per_cluster
     return clustered_data, clustered_labels
 
+
+def compute_optimal_transport(M, r, c, epsilon=1e-6):
+    lam = 10
+    r = r.cuda()
+    c = c.cuda()
+    n_runs, n, m = M.shape
+    P = torch.exp(- lam * M)
+    P /= P.view((n_runs, -1)).sum(1).unsqueeze(1).unsqueeze(1)
+    u = torch.zeros(n_runs, n).cuda()
+    maxiters = 1000
+
+    # normalize this matrix
+    iters = 1
+    while torch.max(torch.abs(u - P.sum(2))) > epsilon:  # 如果P当中存在nan，这里就不会执行了
+        u = P.sum(2)
+        P *= (r / u).view((n_runs, -1, 1))
+        P *= (c / P.sum(1)).view((n_runs, 1, -1))
+        if iters == maxiters:
+            break
+        iters = iters + 1
+
+    # print(torch.max(torch.abs(u - P[88].sum(1))) > epsilon)  # miniimagenet nan
+    return P, torch.sum(P * M)
+
+
+def cluster_data_and_labels_sinkhorn(active_data, active_data_afsl, active_label):
+    """
+    :param active_data: A CUDA tensor of shape (num_tasks, num_samples, num_features)
+                        representing the data for multiple tasks.
+    :param active_data_afsl: A CUDA tensor of the same shape as active_data, representing
+                             the data from which we will select the support set.
+    :param active_label: A CUDA tensor of shape (num_tasks, num_samples) with int64 elements,
+                         representing the labels of the data.
+    :return: Two tensors, support_datas and support_labels, each of shape (num_tasks, 25, [num_features or 1]),
+             representing the selected support data and labels.
+    """
+    num_tasks, num_samples, num_features = active_data.shape
+    num_clusters = 5
+    n_queries = num_samples // num_clusters  # Ensure this is integer division
+
+    dist = torch.zeros((num_tasks, num_samples, num_clusters)).cuda()
+    for i in range(num_tasks):
+        # Extract the data for the current task
+        task_data = active_data[i].cpu().numpy()
+        # Perform KMeans clustering
+        kmeans = KMeans(n_clusters=num_clusters, n_init=10).fit(task_data)
+        cluster_centers = torch.tensor(kmeans.cluster_centers_).cuda()
+        # Compute the distance from each sample to each cluster center
+        for j in range(num_clusters):
+            dist[i, :, j] = torch.norm(active_data[i] - cluster_centers[j], dim=1)
+
+    # sinkhorn
+    r = torch.ones(num_tasks, num_samples).cuda()
+    c = torch.ones(num_tasks, num_clusters).cuda() * n_queries
+    p_xj, _ = compute_optimal_transport(dist, r, c, epsilon=1e-6)
+    entropy = -torch.sum(p_xj * torch.log(p_xj + 1e-9), dim=2)  # 计算熵，加入1e-9避免log(0)的情况
+
+    # Selecting the samples with the minimum entropy within each cluster
+    support_datas = torch.zeros((num_tasks, num_clusters * 5, num_features)).cuda()
+    support_labels = torch.zeros((num_tasks, num_clusters * 5)).long().cuda()  # Assuming labels are integers
+
+    for i in range(num_tasks):
+        cluster_indices = torch.argmin(dist[i], dim=1)  # Indices of the closest cluster for each sample
+        for j in range(num_clusters):
+            # Find the indices of the samples that belong to cluster j
+            in_cluster_idx = torch.nonzero(cluster_indices == j, as_tuple=False).squeeze(-1)
+            cluster_entropy = entropy[i, in_cluster_idx]
+
+            # Find the indices of the 5 samples with the lowest entropy
+            _, low_entropy_idx = torch.topk(cluster_entropy, 5, largest=False)
+
+            selected_samples = in_cluster_idx[low_entropy_idx]
+
+            support_datas[i, j * 5:(j + 1) * 5] = active_data_afsl[i, selected_samples]
+            support_labels[i, j * 5:(j + 1) * 5] = active_label[i, selected_samples]
+
+    return support_datas, support_labels
 
 def check_values(tensor, values):
     for i in range(tensor.size(0)):
@@ -449,9 +510,10 @@ def check_values(tensor, values):
 
 if __name__ == '__main__':
     # ---- data loading
-    n_shot = 5
+    n_shot = 1
     n_ways = 5
     n_queries = 15
+    # n_unlabelled miniimagenet、cifar最多580，tieredimagenet最多934，cub最多28
     n_unlabelled = 100
     n_lsamples = n_ways * n_shot  # 25个已经标记的支持集，用于fsl
     n_usamples = n_ways * n_queries  # 75个查询集，用于fsl和afsl
@@ -460,45 +522,94 @@ if __name__ == '__main__':
     fsl_train_samples = n_lsamples + n_usamples  # 小样本训练25+75个
 
     import FSLTask
-    cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # 5-shot 5-way 115 查询集+未标记支持集
+    fsl = 1  # 是否进行fsl，为1进行fsl，为0不进行
+    balanced = True  # 是否均匀抽取
+    dist_type = 2  # 0随机 1中位数距离 2最小距离 3最大距离 4距离比例
+    random_type = 1  # dist_type==0时， 1聚类后随机 2全部随机 3按照真实标签随机
+    n_clusters = 5  # 聚类的个数
+    samples_per_cluster = int(n_shot * n_ways / n_clusters)  # 聚类中选择样本的个数
+    n_epochs = 20  # gaussian迭代轮数
     dataset = r"cifar"
+    # 均匀抽取的设置1
+    if balanced == True:
+        cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # n-shot 5-way 115 查询集+未标记支持集
+    # 不均匀抽取的设置1
+    else:
+        n_unlabelled_select = 500
+        n_samples_select = n_lsamples + n_usamples + n_ways * n_unlabelled_select
+        cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled_select}  # n-shot 5-way 515 查询集+未标记支持集
+
     FSLTask.loadDataSet(dataset)
     FSLTask.setRandomStates(cfg)
     n_runs = FSLTask._maxRuns
     all_ndatas = FSLTask.GenerateRunSet(cfg=cfg)
-    all_ndatas = all_ndatas.permute(0, 2, 1, 3).reshape(n_runs, n_samples, -1)
-    labels = torch.arange(n_ways).view(1, 1, n_ways).expand(n_runs, n_shot + n_queries + n_unlabelled, 5).clone().view(n_runs,
-                                                                                                        n_samples)
+
+    # 均匀抽取的设置2
+    if balanced == True:
+        all_ndatas = all_ndatas.permute(0, 2, 1, 3).reshape(n_runs, n_samples, -1)
+        labels = torch.arange(n_ways).view(1, 1, n_ways).expand(n_runs, n_shot + n_queries + n_unlabelled, 5).clone().view(n_runs,
+                                                                                                            n_samples)
+    # 不均匀抽取的设置2
+    else:
+        all_ndatas = all_ndatas.permute(0, 2, 1, 3)
+        all_ndatas = all_ndatas.numpy()
+        all_ndatas = all_ndatas.reshape(n_runs, n_samples_select, -1)
+        print(all_ndatas.shape)
+        labels = torch.arange(n_ways).view(1, 1, n_ways).expand(n_runs, n_shot + n_queries + n_unlabelled_select, 5).clone().view(
+            n_runs, n_samples_select)
+        # 设置随机数种子以确保结果的可重复性
+        seed_value = 42  # 可以是任何数字，但必须保持不变以确保每次抽样相同
+        np.random.seed(seed_value)
+        torch.manual_seed(seed_value)
+        # 选择随机索引
+        num_random_samples = 500
+        total_samples = fsl_train_samples + num_random_samples
+        # 从范围 [100, 2600) 中选择 500 个唯一随机索引
+        random_indices = np.random.choice(np.arange(fsl_train_samples, n_samples_select), num_random_samples, replace=False)
+        # 合并这些索引与前 100 个样本的索引
+        selected_indices = np.concatenate([np.arange(fsl_train_samples), random_indices])
+        # 根据选择的索引提取数据
+        all_ndatas = all_ndatas[:, selected_indices, :]
+        labels = labels[:, selected_indices]
+        all_ndatas = torch.from_numpy(all_ndatas)
+        print(all_ndatas.shape, labels.shape)
+        # 清空缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # partition for afsl learning
     ndatas, active_data = all_ndatas[:, :fsl_train_samples, :], all_ndatas[:, fsl_train_samples:, :]  # fsl的数据和未标记支持集数据
     labels, active_label = labels[:, :fsl_train_samples], labels[:, fsl_train_samples:]  # 训练的标签和未标记支持集标签
     active_ndatas = ndatas[:, n_lsamples:, :].clone()  # afsl的初始查询集数据
-
     active_nlabels = labels[:, n_lsamples:]  # afsl的初始查询集标签
     print(ndatas.shape, active_ndatas.shape, active_data.shape, labels.shape, active_nlabels.shape, active_label.shape)
 
     # step1: fsl
     # Power transform
-    # ndatas, labels = data_preprocessing(ndatas, labels, n_lsamples)
-    # n_nfeat = ndatas.size(2)
-    #
-    # # MAP
-    # acc_test = Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels)
-    # print("fsl final accuracy with 15 queries: {:0.2f}±{:0.2f}".format(*(100 * x for x in acc_test)))
+    if fsl == 1:
+        ndatas, labels = data_preprocessing(ndatas, labels, n_lsamples)
+        n_nfeat = ndatas.size(2)
+        # MAP
+        acc_test = Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels)
+        print("fsl final accuracy with 15 queries: {:0.2f}±{:0.2f}".format(*(100 * x for x in acc_test)))
 
     # step2: afsl  get data: for every task, choose 25 samples, and return active datas and labels
     active_data_afsl = active_data.clone()
-    active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples, active=True)
+    active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples)
     print(active_data.shape, active_label.shape)
 
     start_time = time.time()  # 记录开始时间
     # dist=0 and random=1,2,3 表示随机选 1:按类随机5*5  2:全部随机25  3:按真实标签随机5*5(相当于5-shot fsl)
-    # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个
+    # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个  4:根据距离的比例选
 
-    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=0, random=2)
-    active_ndatas = torch.cat([support_datas, active_ndatas], dim=1)
-    active_nlabels = torch.cat([support_labels, active_nlabels], dim=1)
+    # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机
+    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=dist_type, random=random_type,
+                                                            n_clusters=n_clusters, samples_per_cluster=samples_per_cluster)
+    # 聚类之后，通过距离计算最优传输，得到prob，再计算熵，根据熵挑选，结果没有变好
+    # support_datas, support_labels = cluster_data_and_labels_sinkhorn(active_data, active_data_afsl, active_label)
+
+    active_ndatas = torch.cat([support_datas.cpu(), active_ndatas], dim=1)
+    active_nlabels = torch.cat([support_labels.cpu(), active_nlabels], dim=1)
 
     target_values = {0, 1, 2, 3, 4}
     check_values(support_labels, target_values)
@@ -507,12 +618,9 @@ if __name__ == '__main__':
     active_ndatas, active_nlabels = data_preprocessing(active_ndatas, active_nlabels, n_lsamples)  # 数据预处理
     n_nfeat = active_ndatas.size(2)
 
-    # 使用n-shot
-    n_shot = 4
-    n_lsamples = n_ways * n_shot
     mus = get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat)  # 获取支持集均值
 
-    acc_test = Gasussianloop(n_shot, n_queries, n_ways, active_ndatas, active_nlabels, mus=mus)
+    acc_test = Gasussianloop(n_shot, n_queries, n_ways, active_ndatas, active_nlabels, n_epochs=n_epochs, verbose=True, mus=mus)
     end_time = time.time()  # 记录结束时间
     elapsed_time = end_time - start_time  # 计算经过的时间
     print(f"函数执行时间为: {elapsed_time} 秒")
