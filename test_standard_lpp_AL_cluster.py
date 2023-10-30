@@ -518,7 +518,7 @@ if __name__ == '__main__':
     n_shot = 1
     n_ways = 5
     n_queries = 15
-    # n_unlabelled miniimagenet、cifar最多580，tieredimagenet最多934，cub最多28
+    # n_unlabelled+n_shot+n_queries miniimagenet、cifar最多600，tieredimagenet最多954，cub最多48
     n_unlabelled = 100
     n_lsamples = n_ways * n_shot  # n_lsamples表示已经标记的支持集，用于fsl
     n_usamples = n_ways * n_queries  # 75个查询集，用于fsl和afsl
@@ -529,7 +529,7 @@ if __name__ == '__main__':
     import FSLTask
     fsl = 1  # 是否进行fsl，为1进行fsl，为0不进行
     balanced = True  # 是否均匀抽取
-    dist_type = 2  # 0随机 1中位数距离 2最小距离 3最大距离 4距离比例
+    dist_type = 0  # 0随机 1中位数距离 2最小距离 3最大距离 4距离比例
     random_type = 1  # dist_type==0时， 1聚类后随机 2全部随机 3按照真实标签随机
     n_clusters = 5  # 聚类的个数
     samples_per_cluster = int(n_shot * n_ways / n_clusters)  # 聚类中选择样本的个数
@@ -597,14 +597,14 @@ if __name__ == '__main__':
         acc_test = Gasussianloop(n_shot, n_queries, n_ways, ndatas, labels)
         print("fsl final accuracy with 15 queries: {:0.2f}±{:0.2f}".format(*(100 * x for x in acc_test)))
 
-    # step2: afsl  get data: for every task, choose 25 samples, and return active datas and labels
+    # step2: afsl  get data: for every task, choose samples, and return active datas and labels
     active_data_afsl = active_data.clone()
     active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples)
     print(active_data.shape, active_label.shape)
 
     start_time = time.time()  # 记录开始时间
     # dist=0 and random=1,2,3 表示随机选 1:按类随机  2:全部随机  3:按真实标签随机(相当于5-shot fsl)
-    # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数  2:距离最小  3:距离最大  4:根据距离的比例选
+    # dist=1/2/3/4表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数  2:距离最小  3:距离最大  4:根据距离的比例选
 
     # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机，一般聚类越多，AL结果越好
     support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=dist_type, random=random_type,
