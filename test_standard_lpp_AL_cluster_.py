@@ -603,8 +603,8 @@ if __name__ == '__main__':
     print(active_data.shape, active_label.shape)
 
     start_time = time.time()  # 记录开始时间
-    # dist=0 and random=1,2,3 表示随机选 1:按类随机5*5  2:全部随机25  3:按真实标签随机5*5(相当于5-shot fsl)
-    # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个  4:根据距离的比例选
+    # dist=0 and random=1,2,3 表示随机选 1:按类随机  2:全部随机  3:按真实标签随机(相当于5-shot fsl)
+    # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数  2:距离最小  3:距离最大  4:根据距离的比例选
 
     # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机，一般聚类越多，AL结果越好
     support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=dist_type, random=random_type,
