@@ -311,7 +311,7 @@ def get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat):
                 mus[task_index, class_index] = class_data.mean(0)  # 计算当前类别的均值，并将其存储在mus张量中
             else:
                 print(f"Warning：missing values is exist!")
-                mus[task_index, class_index] = torch.zeros(n_nfeat).cuda()  # 初始化为0 nan会使得无法进入sinkhorn中的迭代
+                mus[task_index, class_index] = torch.zeros(n_nfeat).cuda()  # 如果不初始化为0 nan会使得无法进入sinkhorn中的迭代
                 # mus[task_index, class_index] = task_data.mean(0)  # 初始化为这个task的均值
     return mus
 
@@ -330,7 +330,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
     clustered_data = torch.zeros((num_tasks, n_clusters * samples_per_cluster, num_features))
     clustered_labels = torch.zeros((num_tasks, n_clusters * samples_per_cluster), dtype=torch.int64)
 
-    # 对于数据集中的每个任务，执行KMeans聚类
+    # 对于数据集中的每个任务，随机/AL
     for task_idx in range(num_tasks):
         # 从当前任务中提取数据和标签
         task_data = active_data[task_idx]
@@ -373,7 +373,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             cluster_samples_idx = np.where(clusters == cluster_idx)[0]
             if dist == 0 and random == 1:
                 if len(cluster_samples_idx) < samples_per_cluster:
-                    # 当前簇中只有一个样本，重复抽样
+                    # 当前簇中样本不够，重复抽样
                     selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=True)
                 else:
                     # 从当前簇中随机选择样本
@@ -411,11 +411,15 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, dist=0
             selected_labels = task_labels[selected_indices]
             # 将选定的样本存储到最终张量中
             start_idx = samples_selected
-            for i in range(samples_per_cluster):
-                # 循环赋值，解决选取不到足够样本不到的情况
-                data_idx = i % selected_data.shape[0]  # 这将在 0 到 num_selected_data-1 之间循环
-                clustered_data[task_idx, start_idx + i, :] = selected_data[data_idx]
-                clustered_labels[task_idx, start_idx + i] = selected_labels[data_idx]
+            if len(cluster_samples_idx) < samples_per_cluster:  # 当前簇中样本不够，循环赋值
+                for i in range(samples_per_cluster):
+                    data_idx = i % selected_data.shape[0]  # 这将在 0 到 num_selected_data-1 之间循环
+                    clustered_data[task_idx, start_idx + i, :] = selected_data[data_idx]
+                    clustered_labels[task_idx, start_idx + i] = selected_labels[data_idx]
+            else:
+                end_idx = start_idx + samples_per_cluster
+                clustered_data[task_idx, start_idx:end_idx, :] = selected_data
+                clustered_labels[task_idx, start_idx:end_idx] = selected_labels
             samples_selected += samples_per_cluster
     return clustered_data, clustered_labels
 
@@ -510,16 +514,17 @@ def check_values(tensor, values):
 
 if __name__ == '__main__':
     # ---- data loading
+    seed_value = 42  # 随机种子
     n_shot = 1
     n_ways = 5
     n_queries = 15
     # n_unlabelled miniimagenet、cifar最多580，tieredimagenet最多934，cub最多28
     n_unlabelled = 100
-    n_lsamples = n_ways * n_shot  # 25个已经标记的支持集，用于fsl
+    n_lsamples = n_ways * n_shot  # n_lsamples表示已经标记的支持集，用于fsl
     n_usamples = n_ways * n_queries  # 75个查询集，用于fsl和afsl
-    active_samples = n_ways * n_unlabelled  # 500/140个未标记的支持集(cub 140)   ** idea1:不均匀的情况
-    n_samples = n_lsamples + n_usamples + active_samples  # 600/240个样本
-    fsl_train_samples = n_lsamples + n_usamples  # 小样本训练25+75个
+    active_samples = n_ways * n_unlabelled  # 未标记的支持集 500/140个未标记的支持集(cub 140)   ** idea1:不均匀的情况
+    n_samples = n_lsamples + n_usamples + active_samples  # 全部样本(已标记支持集+未标记支持集+查询集)
+    fsl_samples = n_lsamples + n_usamples  # 用于fsl训练的数据集
 
     import FSLTask
     fsl = 1  # 是否进行fsl，为1进行fsl，为0不进行
@@ -558,16 +563,15 @@ if __name__ == '__main__':
         labels = torch.arange(n_ways).view(1, 1, n_ways).expand(n_runs, n_shot + n_queries + n_unlabelled_select, 5).clone().view(
             n_runs, n_samples_select)
         # 设置随机数种子以确保结果的可重复性
-        seed_value = 42  # 可以是任何数字，但必须保持不变以确保每次抽样相同
         np.random.seed(seed_value)
         torch.manual_seed(seed_value)
         # 选择随机索引
         num_random_samples = 500
-        total_samples = fsl_train_samples + num_random_samples
-        # 从范围 [100, 2600) 中选择 500 个唯一随机索引
-        random_indices = np.random.choice(np.arange(fsl_train_samples, n_samples_select), num_random_samples, replace=False)
+        total_samples = fsl_samples + num_random_samples
+        # 从范围 [100, 2600) 中选择 500 个随机索引
+        random_indices = np.random.choice(np.arange(fsl_samples, n_samples_select), num_random_samples, replace=False)
         # 合并这些索引与前 100 个样本的索引
-        selected_indices = np.concatenate([np.arange(fsl_train_samples), random_indices])
+        selected_indices = np.concatenate([np.arange(fsl_samples), random_indices])
         # 根据选择的索引提取数据
         all_ndatas = all_ndatas[:, selected_indices, :]
         labels = labels[:, selected_indices]
@@ -578,8 +582,8 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
 
     # partition for afsl learning
-    ndatas, active_data = all_ndatas[:, :fsl_train_samples, :], all_ndatas[:, fsl_train_samples:, :]  # fsl的数据和未标记支持集数据
-    labels, active_label = labels[:, :fsl_train_samples], labels[:, fsl_train_samples:]  # 训练的标签和未标记支持集标签
+    ndatas, active_data = all_ndatas[:, :fsl_samples, :], all_ndatas[:, fsl_samples:, :]  # fsl的数据和未标记支持集数据
+    labels, active_label = labels[:, :fsl_samples], labels[:, fsl_samples:]  # fsl的标签和未标记支持集标签
     active_ndatas = ndatas[:, n_lsamples:, :].clone()  # afsl的初始查询集数据
     active_nlabels = labels[:, n_lsamples:]  # afsl的初始查询集标签
     print(ndatas.shape, active_ndatas.shape, active_data.shape, labels.shape, active_nlabels.shape, active_label.shape)
@@ -602,17 +606,17 @@ if __name__ == '__main__':
     # dist=0 and random=1,2,3 表示随机选 1:按类随机5*5  2:全部随机25  3:按真实标签随机5*5(相当于5-shot fsl)
     # dist=1/2/3表示根据dist选，为afsl 根据类均值的距离远近从每个聚类中选  1:距离中位数的5个  2:距离最小的5个  3:距离最大的5个  4:根据距离的比例选
 
-    # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机
+    # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机，一般聚类越多，AL结果越好
     support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, dist=dist_type, random=random_type,
-                                                            n_clusters=n_clusters, samples_per_cluster=samples_per_cluster)
+                                                            n_clusters=n_clusters, samples_per_cluster=samples_per_cluster, random_state=seed_value)
     # 聚类之后，通过距离计算最优传输，得到prob，再计算熵，根据熵挑选，结果没有变好
     # support_datas, support_labels = cluster_data_and_labels_sinkhorn(active_data, active_data_afsl, active_label)
 
     active_ndatas = torch.cat([support_datas.cpu(), active_ndatas], dim=1)
     active_nlabels = torch.cat([support_labels.cpu(), active_nlabels], dim=1)
 
-    target_values = {0, 1, 2, 3, 4}
-    check_values(support_labels, target_values)
+    # target_values = {0, 1, 2, 3, 4}
+    # check_values(support_labels, target_values)
 
     # step3: afsl
     active_ndatas, active_nlabels = data_preprocessing(active_ndatas, active_nlabels, n_lsamples)  # 数据预处理
