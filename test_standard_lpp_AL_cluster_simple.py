@@ -268,10 +268,11 @@ def PT(ndatas, beta):
     ndatas[nve_idx] *= -1  # return the sign
     return ndatas
 
-def data_preprocessing(ndatas, labels, n_lsamples):
+def data_preprocessing(ndatas, labels, n_lsamples, active=False):
     beta = 0.5
     ndatas = PT(ndatas, beta)
-    ndatas = QRreduction(ndatas)
+    if active == False:
+        ndatas = QRreduction(ndatas)
     ndatas = scaleEachUnitaryDatas(ndatas)
     ndatas = centerDatas(ndatas, n_lsamples)  # trans-mean-sub
 
@@ -280,7 +281,8 @@ def data_preprocessing(ndatas, labels, n_lsamples):
     labels = labels.cuda()
 
     # LPP
-    ndatas, _ = get_LPP_datas(ndatas)
+    if active == False:
+        ndatas, _ = get_LPP_datas(ndatas)
     return ndatas, labels
 
 
@@ -307,9 +309,6 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, random
     # ** idea2 n_clusters * samples_per_cluster可以是25，50，100
     # ** idea3 n_clusters可以是5，10，20
 
-    # 确保输入是正确的维度
-    assert active_data.dim() == 3 and active_data_afsl.dim() == 3 and active_labels.dim() == 2, "Incorrect dimensions for data or labels."
-
     # 设置随机种子以确保可复制性
     np.random.seed(random_state)
     # 获取数据的尺寸
@@ -317,6 +316,7 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, random
     # 初始化输出张量
     clustered_data = torch.zeros((num_tasks, n_clusters * samples_per_cluster, num_features))
     clustered_labels = torch.zeros((num_tasks, n_clusters * samples_per_cluster), dtype=torch.int64)
+    cluster_mean = torch.zeros((num_tasks, n_clusters * samples_per_cluster, active_data.size(2)))
 
     # 对于数据集中的每个任务，随机/AL
     for task_idx in range(num_tasks):
@@ -327,53 +327,33 @@ def cluster_data_and_labels(active_data, active_data_afsl, active_labels, random
 
         if random == 2:
             # 从全部样本中随机选择
-            all_indices = np.arange(num_samples)
-            selected_indices_global = np.random.choice(all_indices, n_clusters * samples_per_cluster, replace=False)
-            for sample_idx, global_idx in enumerate(selected_indices_global):
-                clustered_data[task_idx, sample_idx, :] = task_data_afsl[global_idx]
-                clustered_labels[task_idx, sample_idx] = task_labels[global_idx]
+            selected_indices_global = np.random.choice(num_samples, n_clusters * samples_per_cluster, replace=False)
+            clustered_data[task_idx] = task_data_afsl[selected_indices_global]
+            clustered_labels[task_idx] = task_labels[selected_indices_global]
+            cluster_mean[task_idx] = task_data_afsl[selected_indices_global]
             continue  # 跳过当前任务的后续代码，进入下一个任务的处理
         # 将数据转换为numpy数组，以适应scikit-learn的KMeans实现
         task_data_np = task_data.cpu().numpy()
         # 使用KMeans找到数据的簇
         kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10).fit(task_data_np)
         clusters = kmeans.labels_
-        # 计算所有点到其相应簇中心的距离
-        distances_to_center = np.sqrt(((task_data_np - kmeans.cluster_centers_[clusters]) ** 2).sum(axis=1))
-        samples_selected = 0  # 记录已选择的样本数量
         # 从每个簇中提取样本
         for cluster_idx in range(n_clusters):
             # 获取当前簇的所有样本索引
             cluster_samples_idx = np.where(clusters == cluster_idx)[0]
             if random == 1:
-                if len(cluster_samples_idx) < samples_per_cluster:
-                    # 当前簇中样本不够，重复抽样
-                    selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=True)
-                else:
-                    # 从当前簇中随机选择样本
-                    selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster, replace=False)
+                # 从当前簇中随机选择样本，如果簇中样本不够，重复抽样
+                selected_indices = np.random.choice(cluster_samples_idx, samples_per_cluster,
+                                                    replace=len(cluster_samples_idx) < samples_per_cluster)
+                cluster_mean[task_idx, cluster_idx*samples_per_cluster:(cluster_idx+1)*samples_per_cluster] = task_data_afsl[selected_indices][:samples_per_cluster]
             else:
-                # 计算当前簇中所有点到簇中心的距离
-                cluster_distances = distances_to_center[cluster_samples_idx]
-                # 找到距离最近的点，可能只能选1个
-                target_indices = np.argsort(cluster_distances)[:samples_per_cluster]
-                selected_indices = cluster_samples_idx[target_indices]
-            # 获取选定样本的数据和标签
-            selected_data = task_data_afsl[selected_indices]
-            selected_labels = task_labels[selected_indices]
-            # 将选定的样本存储到最终张量中
-            start_idx = samples_selected
-            if len(cluster_samples_idx) < samples_per_cluster:  # 当前簇中样本不够，循环赋值
-                for i in range(samples_per_cluster):
-                    data_idx = i % selected_data.shape[0]  # 这将在 0 到 num_selected_data-1 之间循环
-                    clustered_data[task_idx, start_idx + i, :] = selected_data[data_idx]
-                    clustered_labels[task_idx, start_idx + i] = selected_labels[data_idx]
-            else:
-                end_idx = start_idx + samples_per_cluster
-                clustered_data[task_idx, start_idx:end_idx, :] = selected_data
-                clustered_labels[task_idx, start_idx:end_idx] = selected_labels
-            samples_selected += samples_per_cluster
-    return clustered_data, clustered_labels
+                distances_to_center = np.linalg.norm(task_data_np[cluster_samples_idx] - kmeans.cluster_centers_[cluster_idx], axis=1)
+                selected_indices = cluster_samples_idx[np.argsort(distances_to_center)[:samples_per_cluster]]
+                cluster_mean[task_idx, cluster_idx * samples_per_cluster:(cluster_idx + 1) * samples_per_cluster] = torch.tensor(kmeans.cluster_centers_[cluster_idx])
+            start_idx = cluster_idx * samples_per_cluster
+            clustered_data[task_idx, start_idx:start_idx+samples_per_cluster] = task_data_afsl[selected_indices][:samples_per_cluster]
+            clustered_labels[task_idx, start_idx:start_idx+samples_per_cluster] = task_labels[selected_indices][:samples_per_cluster]
+    return clustered_data, clustered_labels, cluster_mean
 
 
 def compute_optimal_transport(M, r, c, epsilon=1e-6):
@@ -407,7 +387,7 @@ if __name__ == '__main__':
     n_ways = 5
     n_queries = 15
     # n_unlabelled+n_shot+n_queries miniimagenet、cifar最多600，tieredimagenet最多954，cub最多48
-    n_unlabelled = 100
+    n_unlabelled = 28
     n_lsamples = n_ways * n_shot  # n_lsamples表示已经标记的支持集，用于fsl
     n_usamples = n_ways * n_queries  # 75个查询集，用于fsl和afsl
     active_samples = n_ways * n_unlabelled  # 未标记的支持集 500/140个未标记的支持集(cub 140)   ** idea1:不均匀的情况
@@ -417,11 +397,12 @@ if __name__ == '__main__':
     import FSLTask
     verbose = True  # 是否输出高斯模型每轮的acc
     balanced = True  # 是否均匀抽取
-    random_type = 1  # dist_type==0时， 0最小距离 1聚类后随机 2全部随机
-    n_clusters = 25  # 聚类的个数
-    samples_per_cluster = int(n_shot * n_ways / n_clusters)  # 聚类中选择样本的个数
+    select_cluster_mean = 0  # 选聚类的均值
+    random_type = 0  # 0最小距离 1聚类后随机 2全部随机
+    n_clusters = n_lsamples  # 聚类的个数
+    samples_per_cluster = int(n_lsamples / n_clusters)  # 聚类中选择样本的个数
     n_epochs = 8  # gaussian迭代轮数
-    dataset = r"tieredimagenet"
+    dataset = r"cub"
     # 均匀抽取的设置1
     if balanced == True:
         cfg = {'shot': n_shot, 'ways': n_ways, 'queries': n_queries + n_unlabelled}  # n-shot 5-way 115 查询集+未标记支持集
@@ -477,22 +458,26 @@ if __name__ == '__main__':
 
     # step1: afsl  get data: for every task, choose samples, and return active datas and labels
     active_data_afsl = active_data.clone()
-    active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples)
+    if random_type == 0 and select_cluster_mean == 1:
+        active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples, active=True)
+    else:
+        active_data, active_label = data_preprocessing(active_data, active_label, n_lsamples)
     print(active_data.shape, active_label.shape)
 
     start_time = time.time()  # 记录开始时间
     # random=0,1,2 0:距离最小 1:按类随机  2:全部随机
     # 通过计算距离，当聚类5时结果不如随机，聚类10结果好于随机，一般聚类越多，AL结果越好
-    support_datas, support_labels = cluster_data_and_labels(active_data, active_data_afsl, active_label, random=random_type,
+    support_datas, support_labels, cluster_mean = cluster_data_and_labels(active_data, active_data_afsl, active_label, random=random_type,
                                                             n_clusters=n_clusters, samples_per_cluster=samples_per_cluster, random_state=seed_value)
-
+    if random_type == 0 and select_cluster_mean == 1:
+        support_datas = cluster_mean
+    # 这里做的事情是将挑选出来的样本作为支持集
     active_ndatas = torch.cat([support_datas.cpu(), active_ndatas], dim=1)
     active_nlabels = torch.cat([support_labels.cpu(), active_nlabels], dim=1)
 
     # step2: afsl
     active_ndatas, active_nlabels = data_preprocessing(active_ndatas, active_nlabels, n_lsamples)  # 数据预处理
     n_nfeat = active_ndatas.size(2)
-
     mus = get_mus(active_ndatas, active_nlabels, n_lsamples, n_nfeat)  # 获取支持集均值
 
     lam = 10
